@@ -3,15 +3,19 @@ blueprint:
   description: >
     Control a single light with an IKEA Styrbar remote (Remote Control N2) via ZHA.
 
-    - Up (short press): turn on
+    - Up (short press): turn on, always at a configurable default white temperature
+      (independent of the color/temp presets below)
     - Down (short press): turn off
     - Up (hold): smooth dim up using a native Zigbee "Move" command (hardware-ramped,
       so it is as smooth as an original IKEA bulb)
     - Down (hold): smooth dim down in small steps, with a configurable floor so the
       light never turns off by accident
-    - Left / Right (short press): jump to the previous / next color in a list of
-      preset colors. No helper entity required - the automation looks at the light's
-      current color to figure out where it is in the list.
+    - Left / Right (short press): jump to the previous / next preset in a list of 6
+      colors/white temperatures (first 4 are RGB, last 2 are native white
+      temperatures). No helper entity required - the automation looks at the
+      light's current color mode and value to figure out where it is in the list.
+      White presets use the light's native tunable-white channel
+      (color_temp_kelvin), not an RGB approximation.
     - Release button: dimming stops immediately
 
     Dimming up uses a single native Zigbee Level Control "Move" command, which the
@@ -109,26 +113,58 @@ blueprint:
           min: 5
           max: 200
           step: 5
+    on_color_temp_kelvin:
+      name: "Default color when turning on (K)"
+      description: >
+        Native white temperature applied automatically whenever the light is
+        turned on via short press Up. Independent of the color/temp presets below.
+      default: 2700
+      selector:
+        number:
+          min: 2000
+          max: 6500
+          step: 50
+          unit_of_measurement: "K"
     color_1:
-      name: "Color 1"
-      default: [255, 180, 107]
+      name: "Color 1 (RGB)"
+      default: [255, 147, 40]
       selector:
         color_rgb: {}
     color_2:
       name: "Color 2"
-      default: [255, 255, 255]
+      default: [100, 150, 220]
       selector:
         color_rgb: {}
     color_3:
       name: "Color 3"
-      default: [0, 90, 255]
+      default: [120, 180, 140]
       selector:
         color_rgb: {}
     color_4:
       name: "Color 4"
-      default: [255, 40, 20]
+      default: [150, 110, 190]
       selector:
         color_rgb: {}
+    temp_5:
+      name: "Color 5: native white temperature (K)"
+      description: Uses the light's dedicated white LEDs, not RGB. Default 2700K.
+      default: 2700
+      selector:
+        number:
+          min: 2000
+          max: 6500
+          step: 50
+          unit_of_measurement: "K"
+    temp_6:
+      name: "Color 6: native white temperature (K)"
+      description: Uses the light's dedicated white LEDs, not RGB. Default 4000K.
+      default: 4000
+      selector:
+        number:
+          min: 2000
+          max: 6500
+          step: 50
+          unit_of_measurement: "K"
     color_transition_s:
       name: Color change transition (s)
       default: 1
@@ -185,19 +221,32 @@ action:
       color_transition_s: !input color_transition_s
       arrow_left_arg: !input arrow_left_arg
       arrow_right_arg: !input arrow_right_arg
+      on_color_temp_kelvin: !input on_color_temp_kelvin
       color_1: !input color_1
       color_2: !input color_2
       color_3: !input color_3
       color_4: !input color_4
-      colors: "{{ [color_1, color_2, color_3, color_4] }}"
+      temp_5: !input temp_5
+      temp_6: !input temp_6
+      colors: >-
+        {{ [
+          {'type': 'rgb', 'value': color_1},
+          {'type': 'rgb', 'value': color_2},
+          {'type': 'rgb', 'value': color_3},
+          {'type': 'rgb', 'value': color_4},
+          {'type': 'temp', 'value': temp_5},
+          {'type': 'temp', 'value': temp_6}
+        ] }}
 
   - choose:
-      # --- Short press up -> turn on ---
+      # --- Short press up -> turn on, always with the default on-color (native white) ---
       - conditions: "{{ command == 'on' }}"
         sequence:
           - service: light.turn_on
             target:
               entity_id: !input light
+            data:
+              color_temp_kelvin: "{{ on_color_temp_kelvin }}"
 
       # --- Short press down -> turn off ---
       - conditions: "{{ command == 'off' }}"
@@ -257,20 +306,38 @@ action:
           - "{{ (args | list | first) == arrow_right_arg }}"
         sequence:
           - variables:
-              current_rgb: "{{ state_attr(light_entity, 'rgb_color') | list }}"
+              current_mode: "{{ state_attr(light_entity, 'color_mode') }}"
+              current_rgb: "{{ state_attr(light_entity, 'rgb_color') | list if current_mode == 'rgb' else [] }}"
+              current_temp: "{{ state_attr(light_entity, 'color_temp_kelvin') if current_mode == 'color_temp' else -1 }}"
               current_index: >-
                 {% set ns = namespace(idx=-1) %}
                 {% for c in colors %}
-                  {% if (c | list) == current_rgb %}{% set ns.idx = loop.index0 %}{% endif %}
+                  {% if c.type == 'rgb' and current_mode == 'rgb' and (c.value | list) == current_rgb %}
+                    {% set ns.idx = loop.index0 %}
+                  {% elif c.type == 'temp' and current_mode == 'color_temp' and (c.value | int) == (current_temp | int) %}
+                    {% set ns.idx = loop.index0 %}
+                  {% endif %}
                 {% endfor %}
                 {{ ns.idx }}
               next_index: "{{ (current_index | int + 1) % (colors | length) }}"
-          - service: light.turn_on
-            target:
-              entity_id: !input light
-            data:
-              rgb_color: "{{ colors[next_index | int] }}"
-              transition: "{{ color_transition_s }}"
+              next_color: "{{ colors[next_index | int] }}"
+          - choose:
+              - conditions: "{{ next_color.type == 'rgb' }}"
+                sequence:
+                  - service: light.turn_on
+                    target:
+                      entity_id: !input light
+                    data:
+                      rgb_color: "{{ next_color.value }}"
+                      transition: "{{ color_transition_s }}"
+              - conditions: "{{ next_color.type == 'temp' }}"
+                sequence:
+                  - service: light.turn_on
+                    target:
+                      entity_id: !input light
+                    data:
+                      color_temp_kelvin: "{{ next_color.value }}"
+                      transition: "{{ color_transition_s }}"
 
       # --- Left arrow (short press) -> previous color in the list ---
       - conditions:
@@ -278,17 +345,35 @@ action:
           - "{{ (args | list | first) == arrow_left_arg }}"
         sequence:
           - variables:
-              current_rgb: "{{ state_attr(light_entity, 'rgb_color') | list }}"
+              current_mode: "{{ state_attr(light_entity, 'color_mode') }}"
+              current_rgb: "{{ state_attr(light_entity, 'rgb_color') | list if current_mode == 'rgb' else [] }}"
+              current_temp: "{{ state_attr(light_entity, 'color_temp_kelvin') if current_mode == 'color_temp' else -1 }}"
               current_index: >-
                 {% set ns = namespace(idx=-1) %}
                 {% for c in colors %}
-                  {% if (c | list) == current_rgb %}{% set ns.idx = loop.index0 %}{% endif %}
+                  {% if c.type == 'rgb' and current_mode == 'rgb' and (c.value | list) == current_rgb %}
+                    {% set ns.idx = loop.index0 %}
+                  {% elif c.type == 'temp' and current_mode == 'color_temp' and (c.value | int) == (current_temp | int) %}
+                    {% set ns.idx = loop.index0 %}
+                  {% endif %}
                 {% endfor %}
                 {{ ns.idx }}
               prev_index: "{{ (current_index | int - 1) % (colors | length) }}"
-          - service: light.turn_on
-            target:
-              entity_id: !input light
-            data:
-              rgb_color: "{{ colors[prev_index | int] }}"
-              transition: "{{ color_transition_s }}"
+              prev_color: "{{ colors[prev_index | int] }}"
+          - choose:
+              - conditions: "{{ prev_color.type == 'rgb' }}"
+                sequence:
+                  - service: light.turn_on
+                    target:
+                      entity_id: !input light
+                    data:
+                      rgb_color: "{{ prev_color.value }}"
+                      transition: "{{ color_transition_s }}"
+              - conditions: "{{ prev_color.type == 'temp' }}"
+                sequence:
+                  - service: light.turn_on
+                    target:
+                      entity_id: !input light
+                    data:
+                      color_temp_kelvin: "{{ prev_color.value }}"
+                      transition: "{{ color_transition_s }}"
