@@ -1,19 +1,24 @@
 blueprint:
-  name: ZHA - IKEA Styrbar (Smooth Dimming, Non-IKEA-light safe)
+  name: ZHA - IKEA Styrbar (Smooth Dimming + Color Presets, Non-IKEA-light safe)
   description: >
     Control a single light with an IKEA Styrbar remote (Remote Control N2) via ZHA.
 
     - Up (short press): turn on
     - Down (short press): turn off
-    - Up (hold): smooth dim up
-    - Down (hold): smooth dim down, with a configurable floor (never turns the light off)
+    - Up (hold): smooth dim up using a native Zigbee "Move" command (hardware-ramped,
+      so it is as smooth as an original IKEA bulb)
+    - Down (hold): smooth dim down in small steps, with a configurable floor so the
+      light never turns off by accident
+    - Left / Right (short press): jump to the previous / next color in a list of
+      preset colors. No helper entity required - the automation looks at the light's
+      current color to figure out where it is in the list.
     - Release button: dimming stops immediately
 
-    Designed to work reliably with non-IKEA Zigbee lights (e.g. Aqara LED strips) where
-    state updates can lag behind fast repeated commands. The dimming transition is kept
-    shorter than the repeat delay so each step reads a fresh brightness value instead of
-    a stale one, which avoids the "jerky"/uneven dimming some non-IKEA bulbs exhibit with
-    other blueprints.
+    Dimming up uses a single native Zigbee Level Control "Move" command, which the
+    light's own firmware ramps in hardware - this avoids the repeated-command jitter
+    that some non-IKEA Zigbee lights (e.g. Aqara LED strips) show with HA-side step
+    loops. Dimming down uses a step loop instead, because native Move has no concept
+    of a minimum level and would turn the light fully off once it reaches 0.
   domain: automation
   input:
     remote:
@@ -24,14 +29,42 @@ blueprint:
           integration: zha
           model: Remote Control N2
     light:
-      name: Light
-      description: The light entity to control.
+      name: Light (entity)
+      description: The light entity to control (used for on/off, dim-down, and colors).
       selector:
         entity:
           domain: light
+    light_device:
+      name: Light (Zigbee device)
+      description: >
+        The same light, selected as a ZHA device (not entity) - needed to send the
+        native Move/Stop command for smooth dim-up. Pick the device that corresponds
+        to the light entity above.
+      selector:
+        device:
+          integration: zha
+    endpoint_id:
+      name: Endpoint ID
+      description: >
+        Usually 1. Check in ZHA -> Devices -> your light -> Zigbee Device Signature
+        if unsure.
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 20
+          step: 1
+    move_rate:
+      name: Dim-up speed (units/sec)
+      description: Higher = faster ramp when holding Up. Try 30-60.
+      default: 40
+      selector:
+        number:
+          min: 5
+          max: 254
+          step: 5
     step_pct:
-      name: Brightness step per iteration (%)
-      description: How much brightness changes on each repeat cycle while holding a button.
+      name: Brightness step per iteration when dimming down (%)
       default: 3
       selector:
         number:
@@ -39,7 +72,7 @@ blueprint:
           max: 20
           step: 1
     step_delay_ms:
-      name: Delay between steps (ms)
+      name: Delay between steps when dimming down (ms)
       default: 150
       selector:
         number:
@@ -47,7 +80,7 @@ blueprint:
           max: 1000
           step: 10
     transition_s:
-      name: Transition per step (s)
+      name: Transition per step when dimming down (s)
       description: >
         Should be shorter than or equal to "Delay between steps", otherwise dimming
         will feel jerky because the next step reads brightness before the previous
@@ -68,7 +101,7 @@ blueprint:
           max: 20
           step: 1
     max_iterations:
-      name: Max steps per hold (safety limit)
+      name: Max steps per hold-down (safety limit)
       description: Safety cap in case a "stop" event is ever missed.
       default: 60
       selector:
@@ -76,6 +109,54 @@ blueprint:
           min: 5
           max: 200
           step: 5
+    color_1:
+      name: "Color 1"
+      default: [255, 180, 107]
+      selector:
+        color_rgb: {}
+    color_2:
+      name: "Color 2"
+      default: [255, 255, 255]
+      selector:
+        color_rgb: {}
+    color_3:
+      name: "Color 3"
+      default: [0, 90, 255]
+      selector:
+        color_rgb: {}
+    color_4:
+      name: "Color 4"
+      default: [255, 40, 20]
+      selector:
+        color_rgb: {}
+    color_transition_s:
+      name: Color change transition (s)
+      default: 1
+      selector:
+        number:
+          min: 0
+          max: 5
+          step: 0.5
+    arrow_left_arg:
+      name: "Left arrow: args[0] value"
+      description: >
+        Verify in Developer Tools -> Events (listen to zha_event, press the left
+        arrow) - some Styrbar firmware versions differ. Default matches most units.
+      default: 257
+      selector:
+        number:
+          min: 0
+          max: 1000
+          step: 1
+    arrow_right_arg:
+      name: "Right arrow: args[0] value"
+      description: Same as above, for the right arrow.
+      default: 256
+      selector:
+        number:
+          min: 0
+          max: 1000
+          step: 1
 
 mode: restart
 max_exceeded: silent
@@ -89,12 +170,26 @@ trigger:
 action:
   - variables:
       command: "{{ trigger.event.data.command }}"
+      args: "{{ trigger.event.data.args }}"
       light_entity: !input light
+      light_device: !input light_device
+      light_ieee: >-
+        {{ (device_attr(light_device, 'identifiers') | list | first)[1] }}
+      endpoint_id: !input endpoint_id
+      move_rate: !input move_rate
       step_pct: !input step_pct
       step_delay_ms: !input step_delay_ms
       transition_s: !input transition_s
       min_pct: !input min_pct
       max_iterations: !input max_iterations
+      color_transition_s: !input color_transition_s
+      arrow_left_arg: !input arrow_left_arg
+      arrow_right_arg: !input arrow_right_arg
+      color_1: !input color_1
+      color_2: !input color_2
+      color_3: !input color_3
+      color_4: !input color_4
+      colors: "{{ [color_1, color_2, color_3, color_4] }}"
 
   - choose:
       # --- Short press up -> turn on ---
@@ -111,26 +206,20 @@ action:
             target:
               entity_id: !input light
 
-      # --- Hold up -> dim up ---
+      # --- Hold up -> native Zigbee Move (hardware-ramped, smooth) ---
       - conditions: "{{ command == 'move_with_on_off' }}"
         sequence:
-          - repeat:
-              count: "{{ max_iterations }}"
-              sequence:
-                - variables:
-                    cur_pct: >-
-                      {{ (state_attr(light_entity, 'brightness') | int(0)) / 255 * 100 }}
-                    target_pct: "{{ [cur_pct + step_pct, 100] | min | round(0) }}"
-                - service: light.turn_on
-                  target:
-                    entity_id: !input light
-                  data:
-                    brightness_pct: "{{ target_pct }}"
-                    transition: "{{ transition_s }}"
-                - delay:
-                    milliseconds: "{{ step_delay_ms }}"
+          - service: zha.issue_zigbee_cluster_command
+            data:
+              ieee: "{{ light_ieee }}"
+              endpoint_id: "{{ endpoint_id }}"
+              cluster_id: 8
+              cluster_type: "in"
+              command: 5
+              command_type: "server"
+              args: [0, "{{ move_rate }}"]
 
-      # --- Hold down -> dim down, with floor ---
+      # --- Hold down -> step-loop dim down, with floor ---
       - conditions: "{{ command == 'move' }}"
         sequence:
           - repeat:
@@ -149,7 +238,57 @@ action:
                 - delay:
                     milliseconds: "{{ step_delay_ms }}"
 
-      # --- Button release -> stop immediately (mode: restart handles this) ---
+      # --- Release -> native Stop for the Move command (also ends the down repeat via mode: restart) ---
       - conditions: "{{ command in ['stop', 'stop_with_on_off'] }}"
         sequence:
-          - delay: "00:00:00.050"
+          - service: zha.issue_zigbee_cluster_command
+            data:
+              ieee: "{{ light_ieee }}"
+              endpoint_id: "{{ endpoint_id }}"
+              cluster_id: 8
+              cluster_type: "in"
+              command: 3
+              command_type: "server"
+              args: []
+
+      # --- Right arrow (short press) -> next color in the list ---
+      - conditions:
+          - "{{ command == 'press' }}"
+          - "{{ (args | list | first) == arrow_right_arg }}"
+        sequence:
+          - variables:
+              current_rgb: "{{ state_attr(light_entity, 'rgb_color') | list }}"
+              current_index: >-
+                {% set ns = namespace(idx=-1) %}
+                {% for c in colors %}
+                  {% if (c | list) == current_rgb %}{% set ns.idx = loop.index0 %}{% endif %}
+                {% endfor %}
+                {{ ns.idx }}
+              next_index: "{{ (current_index | int + 1) % (colors | length) }}"
+          - service: light.turn_on
+            target:
+              entity_id: !input light
+            data:
+              rgb_color: "{{ colors[next_index | int] }}"
+              transition: "{{ color_transition_s }}"
+
+      # --- Left arrow (short press) -> previous color in the list ---
+      - conditions:
+          - "{{ command == 'press' }}"
+          - "{{ (args | list | first) == arrow_left_arg }}"
+        sequence:
+          - variables:
+              current_rgb: "{{ state_attr(light_entity, 'rgb_color') | list }}"
+              current_index: >-
+                {% set ns = namespace(idx=-1) %}
+                {% for c in colors %}
+                  {% if (c | list) == current_rgb %}{% set ns.idx = loop.index0 %}{% endif %}
+                {% endfor %}
+                {{ ns.idx }}
+              prev_index: "{{ (current_index | int - 1) % (colors | length) }}"
+          - service: light.turn_on
+            target:
+              entity_id: !input light
+            data:
+              rgb_color: "{{ colors[prev_index | int] }}"
+              transition: "{{ color_transition_s }}"
