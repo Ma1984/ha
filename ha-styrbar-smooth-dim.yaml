@@ -125,6 +125,33 @@ blueprint:
           max: 6500
           step: 50
           unit_of_measurement: "K"
+    on_brightness_pct:
+      name: "Default brightness when turning on (%)"
+      description: Brightness applied automatically whenever the light is turned on via short press Up.
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+    on_transition_s:
+      name: "Turn-on transition (s)"
+      description: How gently the light fades in when turned on, instead of snapping instantly.
+      default: 0.5
+      selector:
+        number:
+          min: 0
+          max: 5
+          step: 0.5
+    off_transition_s:
+      name: "Turn-off transition (s)"
+      description: How gently the light fades out when turned off, instead of snapping instantly.
+      default: 0.5
+      selector:
+        number:
+          min: 0
+          max: 5
+          step: 0.5
     color_1:
       name: "Color 1 (RGB)"
       default: [255, 147, 40]
@@ -222,6 +249,9 @@ action:
       arrow_left_arg: !input arrow_left_arg
       arrow_right_arg: !input arrow_right_arg
       on_color_temp_kelvin: !input on_color_temp_kelvin
+      on_brightness_pct: !input on_brightness_pct
+      on_transition_s: !input on_transition_s
+      off_transition_s: !input off_transition_s
       color_1: !input color_1
       color_2: !input color_2
       color_3: !input color_3
@@ -239,7 +269,7 @@ action:
         ] }}
 
   - choose:
-      # --- Short press up -> turn on, always with the default on-color (native white) ---
+      # --- Short press up -> turn on, always with the default on-color and brightness ---
       - conditions: "{{ command == 'on' }}"
         sequence:
           - service: light.turn_on
@@ -247,6 +277,8 @@ action:
               entity_id: !input light
             data:
               color_temp_kelvin: "{{ on_color_temp_kelvin }}"
+              brightness_pct: "{{ on_brightness_pct }}"
+              transition: "{{ on_transition_s }}"
 
       # --- Short press down -> turn off ---
       - conditions: "{{ command == 'off' }}"
@@ -254,6 +286,8 @@ action:
           - service: light.turn_off
             target:
               entity_id: !input light
+            data:
+              transition: "{{ off_transition_s }}"
 
       # --- Hold up -> native Zigbee Move (hardware-ramped, smooth) ---
       - conditions: "{{ command == 'move_with_on_off' }}"
