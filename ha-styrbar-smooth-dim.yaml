@@ -1,0 +1,155 @@
+blueprint:
+  name: ZHA - IKEA Styrbar (Smooth Dimming, Non-IKEA-light safe)
+  description: >
+    Control a single light with an IKEA Styrbar remote (Remote Control N2) via ZHA.
+
+    - Up (short press): turn on
+    - Down (short press): turn off
+    - Up (hold): smooth dim up
+    - Down (hold): smooth dim down, with a configurable floor (never turns the light off)
+    - Release button: dimming stops immediately
+
+    Designed to work reliably with non-IKEA Zigbee lights (e.g. Aqara LED strips) where
+    state updates can lag behind fast repeated commands. The dimming transition is kept
+    shorter than the repeat delay so each step reads a fresh brightness value instead of
+    a stale one, which avoids the "jerky"/uneven dimming some non-IKEA bulbs exhibit with
+    other blueprints.
+  domain: automation
+  input:
+    remote:
+      name: Styrbar remote
+      description: Select your IKEA Styrbar (Remote Control N2), paired via ZHA.
+      selector:
+        device:
+          integration: zha
+          model: Remote Control N2
+    light:
+      name: Light
+      description: The light entity to control.
+      selector:
+        entity:
+          domain: light
+    step_pct:
+      name: Brightness step per iteration (%)
+      description: How much brightness changes on each repeat cycle while holding a button.
+      default: 3
+      selector:
+        number:
+          min: 1
+          max: 20
+          step: 1
+    step_delay_ms:
+      name: Delay between steps (ms)
+      default: 150
+      selector:
+        number:
+          min: 50
+          max: 1000
+          step: 10
+    transition_s:
+      name: Transition per step (s)
+      description: >
+        Should be shorter than or equal to "Delay between steps", otherwise dimming
+        will feel jerky because the next step reads brightness before the previous
+        transition has finished.
+      default: 0.1
+      selector:
+        number:
+          min: 0
+          max: 2
+          step: 0.05
+    min_pct:
+      name: Minimum brightness when dimming down (%)
+      description: The light will never go below this value while holding the down button.
+      default: 1
+      selector:
+        number:
+          min: 0
+          max: 20
+          step: 1
+    max_iterations:
+      name: Max steps per hold (safety limit)
+      description: Safety cap in case a "stop" event is ever missed.
+      default: 60
+      selector:
+        number:
+          min: 5
+          max: 200
+          step: 5
+
+mode: restart
+max_exceeded: silent
+
+trigger:
+  - platform: event
+    event_type: zha_event
+    event_data:
+      device_id: !input remote
+
+action:
+  - variables:
+      command: "{{ trigger.event.data.command }}"
+      light_entity: !input light
+      step_pct: !input step_pct
+      step_delay_ms: !input step_delay_ms
+      transition_s: !input transition_s
+      min_pct: !input min_pct
+      max_iterations: !input max_iterations
+
+  - choose:
+      # --- Short press up -> turn on ---
+      - conditions: "{{ command == 'on' }}"
+        sequence:
+          - service: light.turn_on
+            target:
+              entity_id: !input light
+
+      # --- Short press down -> turn off ---
+      - conditions: "{{ command == 'off' }}"
+        sequence:
+          - service: light.turn_off
+            target:
+              entity_id: !input light
+
+      # --- Hold up -> dim up ---
+      - conditions: "{{ command == 'move_with_on_off' }}"
+        sequence:
+          - repeat:
+              count: "{{ max_iterations }}"
+              sequence:
+                - variables:
+                    cur_pct: >-
+                      {{ (state_attr(light_entity, 'brightness') | int(0)) / 255 * 100 }}
+                    target_pct: "{{ [cur_pct + step_pct, 100] | min | round(0) }}"
+                - service: light.turn_on
+                  target:
+                    entity_id: !input light
+                  data:
+                    brightness_pct: "{{ target_pct }}"
+                    transition: "{{ transition_s }}"
+                - delay:
+                    milliseconds: "{{ step_delay_ms }}"
+
+      # --- Hold down -> dim down, with floor ---
+      - conditions: "{{ command == 'move' }}"
+        sequence:
+          - repeat:
+              count: "{{ max_iterations }}"
+              sequence:
+                - variables:
+                    cur_pct: >-
+                      {{ (state_attr(light_entity, 'brightness') | int(0)) / 255 * 100 }}
+                    target_pct: "{{ [cur_pct - step_pct, min_pct] | max | round(0) }}"
+                - service: light.turn_on
+                  target:
+                    entity_id: !input light
+                  data:
+                    brightness_pct: "{{ target_pct }}"
+                    transition: "{{ transition_s }}"
+                - delay:
+                    milliseconds: "{{ step_delay_ms }}"
+
+      # --- Button release -> stop immediately (mode: restart handles this) ---
+      - conditions: "{{ command in ['stop', 'stop_with_on_off'] }}"
+        sequence:
+          - delay: "00:00:00.050"
