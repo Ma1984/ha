@@ -7,8 +7,9 @@ well, or don't support Zigbee binding.
 
 ## Features
 
-- Short press Up → turn on **at a configurable default white temperature** (own
-  setting, independent of the 6 color/temp presets); Short press Down → turn off
+- Short press Up → turn on **at a configurable default white temperature and
+  brightness** (own settings, independent of the 6 color/temp presets), with a
+  gentle fade-in; Short press Down → turn off, with a gentle fade-out
 - Hold Up → smooth dim up using a **native Zigbee Level Control "Move" command**.
   The light's own firmware ramps the brightness in hardware, so it's as smooth as an
   original IKEA bulb — no repeated HA-side commands, no jitter.
@@ -69,6 +70,9 @@ by default so each step reads a fresh value.
 | Minimum brightness when dimming down | 1% | Floor — light never turns off via holding down |
 | Max steps per hold-down (safety limit) | 60 | Safety cap in case a stop event is missed |
 | Default color when turning on | 2700K | Native white temperature, applied on short press Up — independent of the presets below |
+| Default brightness when turning on | 30% | Applied on short press Up |
+| Turn-on transition | 0.5 s | Fade-in duration when turning on |
+| Turn-off transition | 0.5 s | Fade-out duration when turning off |
 | Color 1 | `[255, 147, 40]` | RGB |
 | Color 2–4 | muted blue, sage green, lavender | Soft, non-saturated RGB colors |
 | Color 5 (temp) | 2700K | Native white channel via `color_temp_kelvin` |
